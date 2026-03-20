@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>金门大桥 3D 模拟</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; background: #000; }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #fff;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 14px;
+            background: rgba(0,0,0,0.6);
+            padding: 15px 20px;
+            border-radius: 8px;
+            backdrop-filter: blur(10px);
+            z-index: 100;
+        }
+        #info h2 { margin-bottom: 10px; color: #ff6b35; }
+        #fps { color: #4ecdc4; font-weight: bold; }
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #fff;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 12px;
+            background: rgba(0,0,0,0.5);
+            padding: 10px 20px;
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <h2>🌉 金门大桥</h2>
+        <div>FPS: <span id="fps">0</span></div>
+        <div style="margin-top:8px;font-size:12px;opacity:0.8;">
+            鼠标拖动旋转 | 滚轮缩放<br>
+            右键拖动平移
+        </div>
+    </div>
+    <div id="controls">Golden Gate Bridge - San Francisco Bay</div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { Water } from 'three/addons/objects/Water.js';
+        import { Sky } from 'three/addons/objects/Sky.js';
+
+        const BRIDGE_COLOR = 0xc0462d;
+        const TOWER_HEIGHT = 227;
+        const TOWER_WIDTH = 27;
+        const DECK_WIDTH = 27;
+        const DECK_LENGTH = 1280;
+        const TOWER_SPACING = 850;
+        const CABLE_SAG = 143;
+        const SCALE = 0.05;
+
+        let scene, camera, renderer, controls;
+        let water, sun, sky;
+        let clock = new THREE.Clock();
+        let frameCount = 0;
+        let lastTime = performance.now();
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x87ceeb, 0.00015);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 20000);
+            camera.position.set(100, 80, 150);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 0.5;
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.maxPolarAngle = Math.PI * 0.495;
+            controls.target.set(0, 30, 0);
+            controls.minDistance = 40;
+            controls.maxDistance = 800;
+            controls.update();
+
+            createSky();
+            createLights();
+            createWater();
+            createBridge();
+            createEnvironment();
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function createSky() {
+            sun = new THREE.Vector3();
+
+            sky = new Sky();
+            sky.scale.setScalar(10000);
+            scene.add(sky);
+
+            const skyUniforms = sky.material.uniforms;
+            skyUniforms['turbidity'].value = 10;
+            skyUniforms['rayleigh'].value = 2;
+            skyUniforms['mieCoefficient'].value = 0.005;
+            skyUniforms['mieDirectionalG'].value = 0.8;
+
+            const phi = THREE.MathUtils.degToRad(88);
+            const theta = THREE.MathUtils.degToRad(180);
+            sun.setFromSphericalCoords(1, phi, theta);
+            sky.material.uniforms['sunPosition'].value.copy(sun);
+        }
+
+        function createLights() {
+            const ambientLight = new THREE.AmbientLight(0x6688cc, 0.4);
+            scene.add(ambientLight);
+
+            const sunLight = new THREE.DirectionalLight(0xfff4e6, 2);
+            sunLight.position.set(-500, 300, -200);
+            sunLight.castShadow = true;
+            sunLight.shadow.mapSize.width = 2048;
+            sunLight.shadow.mapSize.height = 2048;
+            sunLight.shadow.camera.near = 10;
+            sunLight.shadow.camera.far = 1500;
+            sunLight.shadow.camera.left = -300;
+            sunLight.shadow.camera.right = 300;
+            sunLight.shadow.camera.top = 300;
+            sunLight.shadow.camera.bottom = -100;
+            sunLight.shadow.bias = -0.0001;
+            scene.add(sunLight);
+
+            const fillLight = new THREE.DirectionalLight(0x8ecae6, 0.5);
+            fillLight.position.set(200, 100, 300);
+            scene.add(fillLight);
+
+            const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x362312, 0.6);
+            scene.add(hemiLight);
+        }
+
+        function createWater() {
+            const waterGeometry = new THREE.PlaneGeometry(10000, 10000);
+
+            water = new Water(waterGeometry, {
+                textureWidth: 512,
+                textureHeight: 512,
+                waterNormals: new THREE.TextureLoader().load(
+                    'https://threejs.org/examples/textures/waternormals.jpg',
+                    function(texture) {
+                        texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+                    }
+                ),
+                sunDirection: new THREE.Vector3(),
+                sunColor: 0xffffff,
+                waterColor: 0x001e0f,
+                distortionScale: 3.7,
+                fog: scene.fog !== undefined
+            });
+
+            water.rotation.x = -Math.PI / 2;
+            water.position.y = -5;
+            scene.add(water);
+
+            water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+        }
+
+        function createBridge() {
+            const bridgeGroup = new THREE.Group();
+            bridgeGroup.scale.set(SCALE, SCALE, SCALE);
+
+            const bridgeMaterial = new THREE.MeshStandardMaterial({
+                color: BRIDGE_COLOR,
+                metalness: 0.6,
+                roughness: 0.4,
+            });
+
+            createTowers(bridgeGroup, bridgeMaterial);
+            createMainCables(bridgeGroup, bridgeMaterial);
+            createDeck(bridgeGroup, bridgeMaterial);
+            createSuspenderCables(bridgeGroup);
+
+            scene.add(bridgeGroup);
+        }
+
+        function createTowers(parent, material) {
+            const towerPositions = [-TOWER_SPACING / 2, TOWER_SPACING / 2];
+
+            towerPositions.forEach(x => {
+                const tower = createDetailedTower(material);
+                tower.position.x = x;
+                parent.add(tower);
+            });
+        }
+
+        function createDetailedTower(material) {
+            const tower = new THREE.Group();
+
+            const towerMaterial = material.clone();
+            towerMaterial.metalness = 0.7;
+            towerMaterial.roughness = 0.3;
+
+            const baseWidth = TOWER_WIDTH * 1.5;
+            const segments = 20;
+            const segmentHeight = TOWER_HEIGHT / segments;
+
+            for (let i = 0; i < segments; i++) {
+                const t = i / segments;
+                const nextT = (i + 1) / segments;
+
+                const bottomWidth = baseWidth * (1 - t * 0.3);
+                const topWidth = baseWidth * (1 - nextT * 0.3);
+
+                const section = createTowerSection(bottomWidth, topWidth, segmentHeight, towerMaterial);
+                section.position.y = i * segmentHeight + segmentHeight / 2;
+                section.castShadow = true;
+                section.receiveShadow = true;
+                tower.add(section);
+            }
+
+            addTowerDetails(tower, towerMaterial);
+
+            return tower;
+        }
+
+        function createTowerSection(bottomWidth, topWidth, height, material) {
+            const section = new THREE.Group();
+
+            const legGeometry = new THREE.BoxGeometry(topWidth * 0.3, height, topWidth * 0.3);
+            
+            [-1, 1].forEach(side => {
+                const leg = new THREE.Mesh(legGeometry, material);
+                leg.position.x = side * bottomWidth * 0.35;
+                section.add(leg);
+            });
+
+            const numBraces = 3;
+            for (let i = 0; i < numBraces; i++) {
+                const braceY = (i / (numBraces - 1) - 0.5) * height * 0.8;
+                
+                const crossBrace = new THREE.Mesh(
+                    new THREE.BoxGeometry(bottomWidth * 0.8, height * 0.05, topWidth * 0.15),
+                    material
+                );
+                crossBrace.position.y = braceY;
+                section.add(crossBrace);
+
+                [-1, 1].forEach(side => {
+                    const diagonal = new THREE.Mesh(
+                        new THREE.BoxGeometry(height * 0.02, height * 0.4, topWidth * 0.1),
+                        material
+                    );
+                    diagonal.position.set(side * bottomWidth * 0.2, braceY + height * 0.1, 0);
+                    diagonal.rotation.z = side * 0.5;
+                    section.add(diagonal);
+                });
+            }
+
+            return section;
+        }
+
+        function addTowerDetails(tower, material) {
+            const capGeometry = new THREE.BoxGeometry(TOWER_WIDTH * 0.9, 8, TOWER_WIDTH * 0.9);
+            const cap = new THREE.Mesh(capGeometry, material);
+            cap.position.y = TOWER_HEIGHT + 4;
+            cap.castShadow = true;
+            tower.add(cap);
+
+            const decorativeTop = new THREE.Mesh(
+                new THREE.CylinderGeometry(TOWER_WIDTH * 0.15, TOWER_WIDTH * 0.2, 15, 8),
+                material
+            );
+            decorativeTop.position.y = TOWER_HEIGHT + 15;
+            tower.add(decorativeTop);
+
+            for (let i = 0; i < 4; i++) {
+                const platformY = TOWER_HEIGHT * (0.25 + i * 0.2);
+                const platform = new THREE.Mesh(
+                    new THREE.BoxGeometry(TOWER_WIDTH * 1.1, 3, TOWER_WIDTH * 1.1),
+                    material
+                );
+                platform.position.y = platformY;
+                platform.castShadow = true;
+                tower.add(platform);
+            }
+
+            const artDecoDetails = createArtDecoOrnament(material);
+            artDecoDetails.position.y = TOWER_HEIGHT * 0.9;
+            tower.add(artDecoDetails);
+        }
+
+        function createArtDecoOrnament(material) {
+            const ornament = new THREE.Group();
+
+            const verticalRib = new THREE.Mesh(
+                new THREE.BoxGeometry(2, 30, 2),
+                material
+            );
+            ornament.add(verticalRib);
+
+            for (let i = 0; i < 3; i++) {
+                const rib = new THREE.Mesh(
+                    new THREE.BoxGeometry(1.5, 20 - i * 5, 1.5),
+                    material
+                );
+                rib.position.x = (i + 1) * 3;
+                ornament.add(rib.clone());
+                rib.position.x = -(i + 1) * 3;
+                ornament.add(rib);
+            }
+
+            return ornament;
+        }
+
+        function createMainCables(parent, material) {
+            const cableMaterial = new THREE.MeshStandardMaterial({
+                color: BRIDGE_COLOR,
+                metalness: 0.8,
+                roughness: 0.2,
+            });
+
+            const cableRadius = 3;
+            const anchorPoints = [
+                { x: -DECK_LENGTH / 2 - 50, y: 50 },
+                { x: -TOWER_SPACING / 2, y: TOWER_HEIGHT },
+                { x: 0, y: TOWER_HEIGHT - CABLE_SAG },
+                { x: TOWER_SPACING / 2, y: TOWER_HEIGHT },
+                { x: DECK_LENGTH / 2 + 50, y: 50 }
+            ];
+
+            [-1, 1].forEach(side => {
+                const cable = createParabolicCable(anchorPoints, cableRadius, cableMaterial);
+                cable.position.z = side * DECK_WIDTH * 0.4;
+                cable.castShadow = true;
+                parent.add(cable);
+            });
+        }
+
+        function createParabolicCable(points, radius, material) {
+            const cableGroup = new THREE.Group();
+            const segments = 200;
+
+            const curve = new THREE.CatmullRomCurve3(
+                points.map(p => new THREE.Vector3(p.x, p.y, 0))
+            );
+
+            const tubeGeometry = new THREE.TubeGeometry(curve, segments, radius, 12, false);
+            const cable = new THREE.Mesh(tubeGeometry, material);
+            cable.castShadow = true;
+            cableGroup.add(cable);
+
+            const wireCount = 20;
+            for (let i = 0; i < wireCount; i++) {
+                const angle = (i / wireCount) * Math.PI * 2;
+                const wireRadius = radius * 0.8;
+                const wireCurve = curve.clone();
+                
+                const wire = new THREE.Mesh(
+                    new THREE.TubeGeometry(wireCurve, segments, 0.3, 6, false),
+                    material
+                );
+                wire.position.x = Math.cos(angle) * wireRadius * 0.3;
+                wire.position.z = Math.sin(angle) * wireRadius * 0.3;
+                cableGroup.add(wire);
+            }
+
+            return cableGroup;
+        }
+
+        function createSuspenderCables(parent) {
+            const cableMaterial = new THREE.MeshStandardMaterial({
+                color: BRIDGE_COLOR,
+                metalness: 0.7,
+                roughness: 0.3,
+            });
+
+            const suspenderRadius = 0.3;
+            const spacing = 15;
+            const deckY = 25;
+
+            const cablePositions = [
+                { x: -TOWER_SPACING / 2, y: TOWER_HEIGHT },
+                { x: TOWER_SPACING / 2, y: TOWER_HEIGHT }
+            ];
+
+            for (let x = -TOWER_SPACING / 2 + spacing; x < TOWER_SPACING / 2; x += spacing) {
+                const sag = CABLE_SAG * (1 - Math.pow(2 * x / TOWER_SPACING, 2));
+                const cableY = TOWER_HEIGHT - sag;
+
+                [-1, 1].forEach(side => {
+                    const height = cableY - deckY;
+                    const suspender = new THREE.Mesh(
+                        new THREE.CylinderGeometry(suspenderRadius, suspenderRadius, height, 6),
+                        cableMaterial
+                    );
+                    suspender.position.set(x, deckY + height / 2, side * DECK_WIDTH * 0.4);
+                    suspender.castShadow = true;
+                    parent.add(suspender);
+                });
+            }
+        }
+
+        function createDeck(parent, material) {
+            const deckGroup = new THREE.Group();
+
+            const deckMaterial = new THREE.MeshStandardMaterial({
+                color: 0x333333,
+                metalness: 0.3,
+                roughness: 0.8,
+            });
+
+            const roadMaterial = new THREE.MeshStandardMaterial({
+                color: 0x2a2a2a,
+                metalness: 0.1,
+                roughness: 0.9,
+            });
+
+            const deck = new THREE.Mesh(
+                new THREE.BoxGeometry(DECK_LENGTH, 3, DECK_WIDTH),
+                deckMaterial
+            );
+            deck.position.y = 25;
+            deck.receiveShadow = true;
+            deck.castShadow = true;
+            deckGroup.add(deck);
+
+            const road = new THREE.Mesh(
+                new THREE.BoxGeometry(DECK_LENGTH, 0.5, DECK_WIDTH * 0.85),
+                roadMaterial
+            );
+            road.position.y = 27;
+            road.receiveShadow = true;
+            deckGroup.add(road);
+
+            createRoadMarkings(deckGroup);
+
+            createSideBeams(deckGroup, material);
+
+            createDeckBracing(deckGroup, material);
+
+            parent.add(deckGroup);
+        }
+
+        function createRoadMarkings(parent) {
+            const markingMaterial = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                metalness: 0.1,
+                roughness: 0.5,
+            });
+
+            const centerLine = new THREE.Mesh(
+                new THREE.BoxGeometry(DECK_LENGTH, 0.6, 0.3),
+                markingMaterial
+            );
+            centerLine.position.y = 27.3;
+            parent.add(centerLine);
+
+            const dashLength = 5;
+            const dashGap = 10;
+            for (let x = -DECK_LENGTH / 2 + 10; x < DECK_LENGTH / 2; x += dashLength + dashGap) {
+                [-1, 1].forEach(side => {
+                    const dash = new THREE.Mesh(
+                        new THREE.BoxGeometry(dashLength, 0.6, 0.2),
+                        markingMaterial
+                    );
+                    dash.position.set(x, 27.3, side * DECK_WIDTH * 0.2);
+                    parent.add(dash);
+                });
+            }
+        }
+
+        function createSideBeams(parent, material) {
+            const beamMaterial = material.clone();
+
+            [-1, 1].forEach(side => {
+                const beam = new THREE.Mesh(
+                    new THREE.BoxGeometry(DECK_LENGTH, 5, 2),
+                    beamMaterial
+                );
+                beam.position.set(0, 25, side * (DECK_WIDTH / 2 - 1));
+                beam.castShadow = true;
+                beam.receiveShadow = true;
+                parent.add(beam);
+
+                const railing = createRailing(beamMaterial);
+                railing.position.z = side * (DECK_WIDTH / 2 + 0.5);
+                parent.add(railing);
+            });
+        }
+
+        function createRailing(material) {
+            const railing = new THREE.Group();
+            const postSpacing = 10;
+            const railingHeight = 4;
+
+            for (let x = -DECK_LENGTH / 2; x <= DECK_LENGTH / 2; x += postSpacing) {
+                const post = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.5, railingHeight, 0.5),
+                    material
+                );
+                post.position.set(x, 27 + railingHeight / 2, 0);
+                railing.add(post);
+            }
+
+            const topRail = new THREE.Mesh(
+                new THREE.BoxGeometry(DECK_LENGTH, 0.5, 0.5),
+                material
+            );
+            topRail.position.y = 27 + railingHeight;
+            railing.add(topRail);
+
+            return railing;
+        }
+
+        function createDeckBracing(parent, material) {
+            const bracingMaterial = material.clone();
+            const bracingSpacing = 30;
+
+            for (let x = -DECK_LENGTH / 2 + bracingSpacing; x < DECK_LENGTH / 2; x += bracingSpacing) {
+                const crossBrace = new THREE.Group();
+
+                const diagonal1 = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.5, 3, Math.sqrt(2) * DECK_WIDTH * 0.8),
+                    bracingMaterial
+                );
+                diagonal1.rotation.y = Math.PI / 4;
+                crossBrace.add(diagonal1);
+
+                const diagonal2 = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.5, 3, Math.sqrt(2) * DECK_WIDTH * 0.8),
+                    bracingMaterial
+                );
+                diagonal2.rotation.y = -Math.PI / 4;
+                crossBrace.add(diagonal2);
+
+                crossBrace.position.set(x, 23.5, 0);
+                parent.add(crossBrace);
+            }
+        }
+
+        function createEnvironment() {
+            createTerrain();
+            createDistantCity();
+            createFogParticles();
+        }
+
+        function createTerrain() {
+            const terrainGeometry = new THREE.PlaneGeometry(10000, 10000, 100, 100);
+            const positions = terrainGeometry.attributes.position.array;
+
+            for (let i = 0; i < positions.length; i += 3) {
+                const x = positions[i];
+                const z = positions[i + 1];
+                const distFromCenter = Math.sqrt(x * x + z * z);
+                
+                if (distFromCenter > 500) {
+                    positions[i + 2] = Math.random() * 20 - 10 + 
+                        Math.sin(x * 0.01) * 30 + 
+                        Math.cos(z * 0.01) * 30;
+                }
+            }
+
+            terrainGeometry.computeVertexNormals();
+
+            const terrainMaterial = new THREE.MeshStandardMaterial({
+                color: 0x3d5c3d,
+                roughness: 1,
+                metalness: 0,
+            });
+
+            const terrain = new THREE.Mesh(terrainGeometry, terrainMaterial);
+            terrain.rotation.x = -Math.PI / 2;
+            terrain.position.y = -10;
+            terrain.receiveShadow = true;
+            scene.add(terrain);
+        }
+
+        function createDistantCity() {
+            const cityGroup = new THREE.Group();
+            const buildingMaterial = new THREE.MeshStandardMaterial({
+                color: 0x4a5568,
+                metalness: 0.5,
+                roughness: 0.7,
+            });
+
+            for (let i = 0; i < 50; i++) {
+                const width = 10 + Math.random() * 30;
+                const height = 20 + Math.random() * 100;
+                const depth = 10 + Math.random() * 30;
+
+                const building = new THREE.Mesh(
+                    new THREE.BoxGeometry(width, height, depth),
+                    buildingMaterial
+                );
+
+                const angle = Math.random() * Math.PI;
+                const distance = 800 + Math.random() * 500;
+                
+                building.position.x = Math.cos(angle) * distance;
+                building.position.z = Math.sin(angle) * distance - 500;
+                building.position.y = height / 2 - 10;
+
+                building.castShadow = true;
+                building.receiveShadow = true;
+                cityGroup.add(building);
+            }
+
+            scene.add(cityGroup);
+        }
+
+        function createFogParticles() {
+            const particleCount = 1000;
+            const positions = new Float32Array(particleCount * 3);
+
+            for (let i = 0; i < particleCount; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * 2000;
+                positions[i * 3 + 1] = Math.random() * 200;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 2000;
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            const material = new THREE.PointsMaterial({
+                color: 0xffffff,
+                size: 5,
+                transparent: true,
+                opacity: 0.3,
+                sizeAttenuation: true,
+            });
+
+            const particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = clock.getElapsedTime();
+
+            if (water) {
+                water.material.uniforms['time'].value = time * 0.5;
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+
+            frameCount++;
+            const currentTime = performance.now();
+            if (currentTime - lastTime >= 1000) {
+                document.getElementById('fps').textContent = frameCount;
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+        }
+    </script>
+</body>
+</html>
